@@ -54,6 +54,8 @@ STALE_SECONDS = 2 * 60 * 60    # show "data outdated" after this
 MAINS_BELOW_MV = 1000          # reported battery voltage below this = running on USB power
 BATTERY_WINDOW = 6             # updates (= 3 h at 30 min) to smooth the battery reading over
 BATTERY_FILE = HERE / ".battery-history.json"
+SETTINGS_FILE = HERE / ".settings.json"   # choices made on the preview page (display language)
+LANGUAGES = {"en": "English", "de": "Deutsch"}
 
 log = logging.getLogger("eink")
 
@@ -93,6 +95,27 @@ class Dashboard:
             self.battery_mv = saved.get("last")
         except (OSError, ValueError):
             pass
+
+    @property
+    def language(self) -> str:
+        """Display language: the preview page's choice, else config.toml, else English."""
+        try:
+            lang = json.loads(SETTINGS_FILE.read_text()).get("language")
+            if lang in LANGUAGES:
+                return lang
+        except (OSError, ValueError):
+            pass
+        lang = self.cfg.get("display", {}).get("language", "en")
+        return lang if lang in LANGUAGES else "en"
+
+    def set_language(self, lang: str):
+        try:
+            settings = json.loads(SETTINGS_FILE.read_text())
+        except (OSError, ValueError):
+            settings = {}
+        settings["language"] = lang
+        SETTINGS_FILE.write_text(json.dumps(settings))
+        log.info("display language set to %s", lang)
 
     def fetch(self) -> bool:
         """Download the forecast (preferred provider first, the other as fallback).
@@ -170,7 +193,7 @@ class Dashboard:
 
     def image(self):
         model, stale = self.model()
-        return render.render(model, lang=self.cfg["display"].get("language", "en"),
+        return render.render(model, lang=self.language,
                              source=PROVIDERS[self.provider][2] if self.provider else "",
                              location=self.cfg["location"].get("name", ""),
                              now=datetime.now(ZoneInfo(self.tz)),
@@ -218,17 +241,40 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.dumps({"provider": self.dash.provider, "stale": stale, "battery_mv": self.dash.battery_mv, "battery_mv_smoothed": self.dash.battery_smoothed(),
                                    "weather": model}, indent=2, ensure_ascii=False)
                 self._send(body.encode(), "application/json; charset=utf-8")
+            elif url.path == "/language":
+                lang = q.get("set", [""])[0]
+                if lang in LANGUAGES:
+                    self.dash.set_language(lang)
+                self.send_response(303)
+                self.send_header("Location", "/")
+                self.end_headers()
             elif url.path == "/":
-                html = ('<!doctype html><meta name="viewport" content="width=device-width">'
-                        '<title>E-Ink Dashboard</title><body style="background:#ccc;text-align:center">'
-                        '<img src="/preview.png" style="width:800px;max-width:100%;image-rendering:pixelated;'
-                        'border:12px solid #fff;margin-top:24px"><p><a href="/api/weather">JSON</a></p>')
-                self._send(html.encode(), "text/html; charset=utf-8")
+                self._send(self.index_page().encode(), "text/html; charset=utf-8")
             else:
                 self.send_error(404)
         except Exception:
             log.exception("request failed")
             self.send_error(500)
+
+    def index_page(self) -> str:
+        cur = self.dash.language
+        buttons = "".join(
+            f'<a class="btn{" on" if code == cur else ""}" href="/language?set={code}">{name}</a>'
+            for code, name in LANGUAGES.items())
+        return f"""<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>E-Ink Dashboard</title>
+<style>
+ body{{background:#d5d8d6;font:15px system-ui,sans-serif;color:#1d2421;text-align:center;margin:0;padding:24px 16px}}
+ img{{width:800px;max-width:100%;image-rendering:pixelated;border:12px solid #fff;box-sizing:border-box}}
+ .bar{{display:flex;gap:8px;justify-content:center;align-items:center;margin:16px 0 6px;flex-wrap:wrap}}
+ .btn{{padding:7px 16px;border:1px solid #1d2421;border-radius:6px;color:#1d2421;text-decoration:none;background:#fff}}
+ .btn.on{{background:#1d2421;color:#fff}}
+ p{{color:#4b5450;margin:6px 0}} a.small{{color:#4b5450}}
+</style>
+<img src="/preview.png" alt="Current dashboard frame">
+<div class="bar"><span>Display language</span>{buttons}</div>
+<p>The e-paper picks this up at its next update (:00 / :30).</p>
+<p><a class="small" href="/api/weather">Weather data (JSON)</a></p>"""
 
     def log_message(self, fmt, *args):
         log.info("%s %s", self.address_string(), fmt % args)

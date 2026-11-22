@@ -25,7 +25,7 @@ and a 3D-printable case.
   without power
 - **No reflashing for changes:** layout, language, fonts and refresh interval live on the Pi.
   Preview the screen in any browser
-- **English or German** display text
+- **English or German** display text, switchable with one click on the Pi's preview page
 - **3D-printable case** with battery cradle, wall keyholes and a removable desk stand
   (parametric, regenerate it for your parts)
 
@@ -213,11 +213,11 @@ use the `GxEPD2_420` driver class in the sketch.
 |---|---|---|
 | `location` | `place` | Town name, looked up once and cached. Optional `country = "DE"`, `name` for the footer, or `latitude`/`longitude`/`timezone` to skip the lookup |
 | `weather` | `provider` | `"dwd"` (Germany) or `"openmeteo"` (worldwide); the other one is the fallback |
-| `display` | `language`, `refresh_minutes` | `"en"` or `"de"`; update interval, aligned to the clock |
+| `display` | `language`, `refresh_minutes` | `"en"` or `"de"` (default; the preview page can switch it); update interval, aligned to the clock |
 | `server` | `host`, `port` | Where the server listens |
 | `battery` | `type`, `cells` | `"nimh"` uses a NiMH discharge curve; `"linear"` maps `empty_mv`…`full_mv` |
 
-Endpoints: `/` preview page, `/preview.png`, `/display.bin` (for the ESP32), `/api/weather` (JSON).
+Endpoints: `/` preview page with an **English / Deutsch** switch (saved on the Pi, used from the next update), `/preview.png`, `/display.bin` (for the ESP32), `/api/weather` (JSON).
 
 ## Customizing
 

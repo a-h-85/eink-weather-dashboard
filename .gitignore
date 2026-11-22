@@ -6,3 +6,4 @@ firmware/eink_dashboard/secrets.h
 build/
 server/.location-cache.json
 server/.battery-history.json
+server/.settings.json
