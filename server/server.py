@@ -23,6 +23,7 @@ import io
 import json
 import logging
 import threading
+from collections import deque
 import time
 try:
     import tomllib  # Python 3.11+
@@ -49,6 +50,8 @@ HERE = Path(__file__).resolve().parent
 CACHE_SECONDS = 10 * 60        # don't ask Open-Meteo more often than this
 STALE_SECONDS = 2 * 60 * 60    # show "data outdated" after this
 MAINS_BELOW_MV = 1000          # reported battery voltage below this = running on USB power
+BATTERY_WINDOW = 6             # updates (= 3 h at 30 min) to smooth the battery reading over
+BATTERY_FILE = HERE / ".battery-history.json"
 
 log = logging.getLogger("eink")
 
@@ -78,7 +81,16 @@ class Dashboard:
         first = cfg.get("weather", {}).get("provider", "dwd")
         self.order = [first] + [p for p in PROVIDERS if p != first]
         self.fetched_at = 0.0
-        self.battery_mv: int | None = None
+        self.battery_mv: int | None = None   # last value the ESP32 reported
+        # The ESP32's ADC sometimes reads ~120 mV low for a few wake-ups. Battery voltage only
+        # falls, so the display uses the highest reading of the last BATTERY_WINDOW updates.
+        self.battery_hist: deque[int] = deque(maxlen=BATTERY_WINDOW)
+        try:
+            saved = json.loads(BATTERY_FILE.read_text())
+            self.battery_hist.extend(saved.get("history", []))
+            self.battery_mv = saved.get("last")
+        except (OSError, ValueError):
+            pass
 
     def _refresh(self):
         if time.time() - self.fetched_at < CACHE_SECONDS and self.raw is not None:
@@ -103,6 +115,20 @@ class Dashboard:
             stale = time.time() - self.fetched_at > STALE_SECONDS
             return PROVIDERS[self.provider][1](self.raw, self.tz), stale
 
+    def report_battery(self, mv: int):
+        if mv < MAINS_BELOW_MV:
+            self.battery_hist.clear()        # on USB: start over when the battery comes back
+        else:
+            self.battery_hist.append(mv)
+        self.battery_mv = mv
+        try:
+            BATTERY_FILE.write_text(json.dumps({"last": mv, "history": list(self.battery_hist)}))
+        except OSError as e:
+            log.warning("could not save battery history: %s", e)
+
+    def battery_smoothed(self) -> int | None:
+        return max(self.battery_hist) if self.battery_hist else self.battery_mv
+
     def on_mains(self) -> bool:
         """The ESP reports ~0 mV when no battery is connected (USB power / no divider)."""
         return self.battery_mv is not None and self.battery_mv < MAINS_BELOW_MV
@@ -110,11 +136,12 @@ class Dashboard:
     def battery_pct(self) -> int | None:
         if self.battery_mv is None or self.on_mains():
             return None
+        mv = self.battery_smoothed()
         b = self.cfg.get("battery", {})
         if b.get("type") == "nimh":
-            return nimh_pct(self.battery_mv / 1000 / int(b.get("cells", 3)))
+            return nimh_pct(mv / 1000 / int(b.get("cells", 3)))
         lo, hi = b.get("empty_mv", 3300), b.get("full_mv", 4150)
-        return max(0, min(100, round((self.battery_mv - lo) * 100 / (hi - lo))))
+        return max(0, min(100, round((mv - lo) * 100 / (hi - lo))))
 
     def image(self):
         model, stale = self.model()
@@ -154,7 +181,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if url.path == "/display.bin":
                 if "bat" in q and q["bat"][0].isdigit():
-                    self.dash.battery_mv = int(q["bat"][0])
+                    self.dash.report_battery(int(q["bat"][0]))
                 body = render.to_epd_bytes(self.dash.image())
                 self._send(body, "application/octet-stream",
                            {"X-Sleep-Seconds": self.dash.sleep_seconds()})
@@ -164,7 +191,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(buf.getvalue(), "image/png")
             elif url.path == "/api/weather":
                 model, stale = self.dash.model()
-                body = json.dumps({"provider": self.dash.provider, "stale": stale, "battery_mv": self.dash.battery_mv,
+                body = json.dumps({"provider": self.dash.provider, "stale": stale, "battery_mv": self.dash.battery_mv, "battery_mv_smoothed": self.dash.battery_smoothed(),
                                    "weather": model}, indent=2, ensure_ascii=False)
                 self._send(body.encode(), "application/json; charset=utf-8")
             elif url.path == "/":
