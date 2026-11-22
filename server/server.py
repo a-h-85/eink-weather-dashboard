@@ -47,7 +47,9 @@ PROVIDERS = {
 }
 
 HERE = Path(__file__).resolve().parent
-CACHE_SECONDS = 10 * 60        # don't ask Open-Meteo more often than this
+CACHE_SECONDS = 10 * 60        # refresh the weather in the background at least this often
+PREFETCH_LEAD = 60             # ...and this many seconds before each ESP32 wake-up
+SLOT_OFFSET = 20               # the ESP32 wakes this many seconds after :00 / :30
 STALE_SECONDS = 2 * 60 * 60    # show "data outdated" after this
 MAINS_BELOW_MV = 1000          # reported battery voltage below this = running on USB power
 BATTERY_WINDOW = 6             # updates (= 3 h at 30 min) to smooth the battery reading over
@@ -92,28 +94,51 @@ class Dashboard:
         except (OSError, ValueError):
             pass
 
-    def _refresh(self):
-        if time.time() - self.fetched_at < CACHE_SECONDS and self.raw is not None:
-            return
+    def fetch(self) -> bool:
+        """Download the forecast (preferred provider first, the other as fallback).
+        Runs in the background thread, so the ESP32 never waits for a weather service."""
         loc = self.cfg["location"]
-        for name in self.order:  # preferred provider first, the other as fallback
+        for name in self.order:
             try:
-                self.raw = PROVIDERS[name][0](loc["latitude"], loc["longitude"], self.tz)
-                self.provider = name
-                self.fetched_at = time.time()
-                log.info("fetched forecast from %s", name)
-                return
+                raw = PROVIDERS[name][0](loc["latitude"], loc["longitude"], self.tz)
             except Exception as e:
                 log.warning("forecast fetch from %s failed: %s", name, e)
-        # all failed: keep serving the last good data
+                continue
+            with self.lock:
+                self.raw, self.provider, self.fetched_at = raw, name, time.time()
+            log.info("fetched forecast from %s", name)
+            return True
+        return False  # all failed: keep serving the last good data
 
     def model(self) -> tuple[dict | None, bool]:
+        if self.raw is None:  # first start (or --render): nothing cached yet
+            self.fetch()
         with self.lock:
-            self._refresh()
             if self.raw is None:
                 return None, False
             stale = time.time() - self.fetched_at > STALE_SECONDS
             return PROVIDERS[self.provider][1](self.raw, self.tz), stale
+
+    def next_wake(self, now: float) -> float:
+        """Unix time of the ESP32's next wake-up (:00 / :30 + SLOT_OFFSET)."""
+        period = int(self.cfg["display"].get("refresh_minutes", 30)) * 60
+        local = datetime.fromtimestamp(now, ZoneInfo(self.tz))
+        since_midnight = local.hour * 3600 + local.minute * 60 + local.second + local.microsecond / 1e6
+        return now + period - since_midnight % period + SLOT_OFFSET
+
+    def prefetch_forever(self):
+        """Keep the weather fresh: every CACHE_SECONDS and PREFETCH_LEAD s before each wake-up."""
+        period = int(self.cfg["display"].get("refresh_minutes", 30)) * 60
+        while True:
+            ok = self.fetch()
+            now = time.time()
+            target = self.next_wake(now) - PREFETCH_LEAD
+            if target - now < 5:                      # just fetched for this slot -> the next one
+                target += period
+            wait = min(CACHE_SECONDS, target - now)
+            if not ok:
+                wait = min(wait, 60)                  # retry sooner after a failure
+            time.sleep(max(1.0, wait))
 
     def report_battery(self, mv: int):
         if mv < MAINS_BELOW_MV:
@@ -154,9 +179,8 @@ class Dashboard:
     def sleep_seconds(self) -> int:
         """Sleep until shortly after the next :00 / :30 so updates stay aligned to the clock."""
         period = int(self.cfg["display"].get("refresh_minutes", 30)) * 60
-        now = datetime.now(ZoneInfo(self.tz))
-        since_midnight = now.hour * 3600 + now.minute * 60 + now.second
-        secs = period - since_midnight % period + 20
+        now = time.time()
+        secs = round(self.next_wake(now) - now)
         if secs < 300:  # woke up a bit early -> skip to the following slot
             secs += period
         return secs
@@ -233,6 +257,7 @@ def main():
         return
 
     Handler.dash = dash
+    threading.Thread(target=dash.prefetch_forever, name="prefetch", daemon=True).start()
     srv = cfg.get("server", {})
     host, port = srv.get("host", "0.0.0.0"), int(srv.get("port", 8080))
     log.info("listening on http://%s:%d", host, port)
