@@ -1,0 +1,37 @@
+# Copy to config.toml and adjust.
+
+[location]
+# Just the name of your town. Coordinates and timezone are looked up once (Open-Meteo
+# geocoding, no key) and cached. Not the right one? `python3 server.py --find "Springfield"`
+place = "Berlin"
+# country = "DE"              # optional ISO code if the name exists in several countries
+# name = "Home"               # optional text for the footer (default: the place name)
+# latitude = 52.52            # optional: give all three to skip the lookup
+# longitude = 13.405
+# timezone = "Europe/Berlin"
+
+[weather]
+# "dwd"       Deutscher Wetterdienst via Bright Sky: real station measurements + MOSMIX forecast
+#             (Germany and its border regions only)
+# "openmeteo" Open-Meteo weather models (worldwide) - use this outside Germany
+# The other provider is used automatically if the preferred one is unreachable.
+provider = "dwd"
+
+[display]
+language = "en"               # "en" or "de"
+refresh_minutes = 30          # ESP32 wakes at every :00 / :30 (+20 s)
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[battery]
+# How the battery voltage (mV, measured by the ESP32 before WiFi) becomes a percentage.
+# type = "nimh":   NiMH discharge curve (e.g. Eneloop) x cells. NiMH drops fast from ~1.4 to ~1.27 V
+#                  per cell and then stays flat for weeks, so a linear scale would be misleading.
+# type = "linear": empty_mv -> 0 %, full_mv -> 100 %.
+#                  1-cell Li-ion / LiPo: 3300 / 4150     3x AA alkaline: 3300 / 4650
+type = "nimh"
+cells = 3
+empty_mv = 3300
+full_mv = 4150

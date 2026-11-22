@@ -1,0 +1,14 @@
+[Unit]
+Description=E-ink weather dashboard server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/eink-weather-dashboard/server
+ExecStart=/home/pi/eink-weather-dashboard/venv/bin/python /home/pi/eink-weather-dashboard/server/server.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
