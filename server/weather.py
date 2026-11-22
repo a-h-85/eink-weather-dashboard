@@ -99,6 +99,15 @@ def day_summary(rows: list[tuple[datetime, float | None, float, int, float]],
     }
 
 
+def include_now(day: dict, temp) -> dict:
+    """Today's high/low come from hourly values; the current (10-minute) reading can be newer and
+    higher/lower than any of them, so it always counts too ("now 4°, today's high 3°" never shows)."""
+    if temp is not None:
+        day["tmax"] = temp if day.get("tmax") is None else max(day["tmax"], temp)
+        day["tmin"] = temp if day.get("tmin") is None else min(day["tmin"], temp)
+    return day
+
+
 def _num(v, default=0):
     return default if v is None else v
 
@@ -163,6 +172,7 @@ def summarize(raw: dict, tz: str, now: datetime | None = None) -> dict:
         return day_summary(sorted(rows), since)
 
     today = day(now_local.date(), since=this_hour)
+    include_now(today, current["temp"])
     tomorrow = day((now_local + timedelta(days=1)).date())
 
     return {"now": now.isoformat(timespec="minutes"), "current": current,

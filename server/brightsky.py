@@ -16,7 +16,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from weather import day_summary, icon_code, severity
+from weather import day_summary, icon_code, include_now, severity
 
 API = "https://api.brightsky.dev"
 
@@ -141,6 +141,7 @@ def summarize(raw: dict, tz: str, now: datetime | None = None) -> dict:
         return day_summary(rows, since)
 
     today = day(now.date(), since=this_hour)
+    include_now(today, current["temp"])
     tomorrow = day((now + timedelta(days=1)).date())
 
     return {"now": now.isoformat(timespec="minutes"), "current": current,
