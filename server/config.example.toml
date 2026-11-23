@@ -26,12 +26,16 @@ host = "0.0.0.0"
 port = 8080
 
 [battery]
-# How the battery voltage (mV, measured by the ESP32 before WiFi) becomes a percentage.
-# type = "nimh":   NiMH discharge curve (e.g. Eneloop) x cells. NiMH drops fast from ~1.4 to ~1.27 V
-#                  per cell and then stays flat for weeks, so a linear scale would be misleading.
-# type = "linear": empty_mv -> 0 %, full_mv -> 100 %.
-#                  1-cell Li-ion / LiPo: 3300 / 4150     3x AA alkaline: 3300 / 4650
+# type = "nimh":   NiMH cells have a flat voltage curve, so the level is COUNTED: the ESP32
+#                  reports its awake time, the server adds the sleep current. The voltage only
+#                  guards the very end and detects fresh batteries (or use the button on the
+#                  preview page). Set the capacity of your cells.
+# type = "linear": the voltage maps linearly from empty_mv (0 %) to full_mv (100 %) -
+#                  fine for Li-ion / LiPo (3300 / 4150) or 3x AA alkaline (3300 / 4650).
 type = "nimh"
 cells = 3
+capacity_mah = 1900           # usable capacity of one cell (e.g. Eneloop 1900 mAh)
+active_ma = 75                # average current while awake (WiFi + display refresh)
+sleep_ua = 80                 # deep sleep: ESP32 + regulator quiescent current + divider
 empty_mv = 3300
 full_mv = 4150

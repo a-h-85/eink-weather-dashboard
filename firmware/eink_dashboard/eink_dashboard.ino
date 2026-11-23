@@ -27,9 +27,17 @@ static uint8_t frame[FRAME_BYTES];  // 1 bit/pixel, MSB first, 1 = black
 RTC_DATA_ATTR int32_t savedChannel = 0;
 RTC_DATA_ATTR uint8_t savedBssid[6];
 RTC_DATA_ATTR uint16_t failures = 0;
+// Energy accounting for the Pi: awake time and wake-ups (failed ones included) that the server
+// hasn't been told about yet. The current wake-up is added when it goes to sleep and is
+// reported with the next successful request.
+RTC_DATA_ATTR uint32_t unreportedAwakeMs = 0;
+RTC_DATA_ATTR uint16_t unreportedWakes = 0;
+static const uint32_t BOOT_MS = 250;  // ROM boot + wake stub, before millis() starts counting
 
 static void deepSleep(uint32_t seconds) {
-  Serial.printf("sleeping %lu s\n", (unsigned long)seconds);
+  unreportedAwakeMs += millis() + BOOT_MS;
+  unreportedWakes++;
+  Serial.printf("sleeping %lu s (awake %lu ms)\n", (unsigned long)seconds, (unsigned long)millis());
   Serial.flush();
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
@@ -85,7 +93,8 @@ static bool connectWifi() {
 
 static bool fetchFrame(uint32_t batteryMv, uint32_t &sleepSeconds) {
   HTTPClient http;
-  String url = String("http://") + SERVER_HOST + ":" + SERVER_PORT + "/display.bin?bat=" + batteryMv;
+  String url = String("http://") + SERVER_HOST + ":" + SERVER_PORT + "/display.bin?bat=" + batteryMv +
+               "&awake=" + unreportedAwakeMs + "&wakes=" + unreportedWakes + "&rssi=" + WiFi.RSSI();
   http.setConnectTimeout(5000);
   http.setTimeout(8000);
   if (!http.begin(url)) return false;
@@ -104,6 +113,10 @@ static bool fetchFrame(uint32_t batteryMv, uint32_t &sleepSeconds) {
       else delay(2);
     }
     ok = (got == FRAME_BYTES);
+    if (ok) {  // the server has counted the earlier wake-ups now
+      unreportedAwakeMs = 0;
+      unreportedWakes = 0;
+    }
     long hs = http.header("X-Sleep-Seconds").toInt();
     if (hs >= 60 && hs <= 7200) sleepSeconds = (uint32_t)hs;
   } else {

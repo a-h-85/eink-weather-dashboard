@@ -23,7 +23,6 @@ import io
 import json
 import logging
 import threading
-from collections import deque
 import time
 try:
     import tomllib  # Python 3.11+
@@ -35,6 +34,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
+import battery
 import brightsky
 import location
 import render
@@ -51,28 +51,11 @@ CACHE_SECONDS = 10 * 60        # refresh the weather in the background at least 
 PREFETCH_LEAD = 60             # ...and this many seconds before each ESP32 wake-up
 SLOT_OFFSET = 20               # the ESP32 wakes this many seconds after :00 / :30
 STALE_SECONDS = 2 * 60 * 60    # show "data outdated" after this
-MAINS_BELOW_MV = 1000          # reported battery voltage below this = running on USB power
-BATTERY_WINDOW = 6             # updates (= 3 h at 30 min) to smooth the battery reading over
 BATTERY_FILE = HERE / ".battery-history.json"
 SETTINGS_FILE = HERE / ".settings.json"   # choices made on the preview page (display language)
 LANGUAGES = {"en": "English", "de": "Deutsch"}
 
 log = logging.getLogger("eink")
-
-
-# NiMH (e.g. Eneloop) at a light load: volts per cell -> remaining %. Rough, but far better than linear.
-NIMH_CURVE = [(1.07, 0), (1.10, 3), (1.15, 8), (1.18, 13), (1.21, 22), (1.23, 32), (1.25, 47),
-              (1.27, 62), (1.29, 76), (1.31, 86), (1.34, 94), (1.38, 100)]
-
-
-def nimh_pct(v_cell: float) -> int:
-    pts = NIMH_CURVE
-    if v_cell <= pts[0][0]:
-        return 0
-    for (v0, p0), (v1, p1) in zip(pts, pts[1:]):
-        if v_cell <= v1:
-            return round(p0 + (p1 - p0) * (v_cell - v0) / (v1 - v0))
-    return 100
 
 
 class Dashboard:
@@ -85,16 +68,7 @@ class Dashboard:
         first = cfg.get("weather", {}).get("provider", "dwd")
         self.order = [first] + [p for p in PROVIDERS if p != first]
         self.fetched_at = 0.0
-        self.battery_mv: int | None = None   # last value the ESP32 reported
-        # The ESP32's ADC sometimes reads ~120 mV low for a few wake-ups. Battery voltage only
-        # falls, so the display uses the highest reading of the last BATTERY_WINDOW updates.
-        self.battery_hist: deque[int] = deque(maxlen=BATTERY_WINDOW)
-        try:
-            saved = json.loads(BATTERY_FILE.read_text())
-            self.battery_hist.extend(saved.get("history", []))
-            self.battery_mv = saved.get("last")
-        except (OSError, ValueError):
-            pass
+        self.battery = battery.Battery(cfg.get("battery", {}), BATTERY_FILE)
 
     @property
     def language(self) -> str:
@@ -163,41 +137,13 @@ class Dashboard:
                 wait = min(wait, 60)                  # retry sooner after a failure
             time.sleep(max(1.0, wait))
 
-    def report_battery(self, mv: int):
-        if mv < MAINS_BELOW_MV:
-            self.battery_hist.clear()        # on USB: start over when the battery comes back
-        else:
-            self.battery_hist.append(mv)
-        self.battery_mv = mv
-        try:
-            BATTERY_FILE.write_text(json.dumps({"last": mv, "history": list(self.battery_hist)}))
-        except OSError as e:
-            log.warning("could not save battery history: %s", e)
-
-    def battery_smoothed(self) -> int | None:
-        return max(self.battery_hist) if self.battery_hist else self.battery_mv
-
-    def on_mains(self) -> bool:
-        """The ESP reports ~0 mV when no battery is connected (USB power / no divider)."""
-        return self.battery_mv is not None and self.battery_mv < MAINS_BELOW_MV
-
-    def battery_pct(self) -> int | None:
-        if self.battery_mv is None or self.on_mains():
-            return None
-        mv = self.battery_smoothed()
-        b = self.cfg.get("battery", {})
-        if b.get("type") == "nimh":
-            return nimh_pct(mv / 1000 / int(b.get("cells", 3)))
-        lo, hi = b.get("empty_mv", 3300), b.get("full_mv", 4150)
-        return max(0, min(100, round((mv - lo) * 100 / (hi - lo))))
-
     def image(self):
         model, stale = self.model()
         return render.render(model, lang=self.language,
                              source=PROVIDERS[self.provider][2] if self.provider else "",
                              location=self.cfg["location"].get("name", ""),
                              now=datetime.now(ZoneInfo(self.tz)),
-                             battery_pct=self.battery_pct(), mains=self.on_mains(), stale=stale)
+                             battery_pct=self.battery.pct(), mains=self.battery.on_mains(), stale=stale)
 
     def sleep_seconds(self) -> int:
         """Sleep until shortly after the next :00 / :30 so updates stay aligned to the clock."""
@@ -227,8 +173,14 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(url.query)
         try:
             if url.path == "/display.bin":
-                if "bat" in q and q["bat"][0].isdigit():
-                    self.dash.report_battery(int(q["bat"][0]))
+                def num(key):
+                    v = q.get(key, [""])[0]
+                    return int(v) if v.lstrip("-").isdigit() else None
+                if num("bat") is not None:
+                    self.dash.battery.report(num("bat"), num("awake"), num("wakes"), num("rssi"))
+                    b = self.dash.battery.info()
+                    log.info("battery %s mV, awake %s ms, wakes %s, rssi %s dBm -> %s %% (%.1f mAh used)",
+                             num("bat"), num("awake"), num("wakes"), num("rssi"), b["percent"], b["used_mah"])
                 body = render.to_epd_bytes(self.dash.image())
                 self._send(body, "application/octet-stream",
                            {"X-Sleep-Seconds": self.dash.sleep_seconds()})
@@ -238,7 +190,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(buf.getvalue(), "image/png")
             elif url.path == "/api/weather":
                 model, stale = self.dash.model()
-                body = json.dumps({"provider": self.dash.provider, "stale": stale, "battery_mv": self.dash.battery_mv, "battery_mv_smoothed": self.dash.battery_smoothed(),
+                body = json.dumps({"provider": self.dash.provider, "stale": stale, "battery": self.dash.battery.info(),
                                    "weather": model}, indent=2, ensure_ascii=False)
                 self._send(body.encode(), "application/json; charset=utf-8")
             elif url.path == "/language":
@@ -269,12 +221,43 @@ class Handler(BaseHTTPRequestHandler):
  .bar{{display:flex;gap:8px;justify-content:center;align-items:center;margin:16px 0 6px;flex-wrap:wrap}}
  .btn{{padding:7px 16px;border:1px solid #1d2421;border-radius:6px;color:#1d2421;text-decoration:none;background:#fff}}
  .btn.on{{background:#1d2421;color:#fff}}
+ button.btn{{font:inherit;cursor:pointer}}
  p{{color:#4b5450;margin:6px 0}} a.small{{color:#4b5450}}
 </style>
 <img src="/preview.png" alt="Current dashboard frame">
 <div class="bar"><span>Display language</span>{buttons}</div>
 <p>The e-paper picks this up at its next update (:00 / :30).</p>
+{self.battery_html()}
 <p><a class="small" href="/api/weather">Weather data (JSON)</a></p>"""
+
+    def battery_html(self) -> str:
+        b = self.dash.battery.info()
+        if b["last_mv"] is None:
+            return "<p>Battery: no report from the display yet.</p>"
+        if b["mains"]:
+            return "<p>Battery: none, running on USB power.</p>"
+        parts = [f"<b>{b['percent']} %</b>", f"{b['used_mah']:.0f} of {b['capacity_mah']:.0f} mAh used"]
+        if b["days_in_use"] is not None:
+            parts.append(f"{b['days_in_use']:.1f} days in use")
+        if b["days_left"] is not None:
+            parts.append(f"about {b['days_left']} days left")
+        parts.append(f"{(b['smoothed_mv'] or b['last_mv']) / 1000:.2f} V")
+        if b["rssi_dbm"] is not None:
+            parts.append(f"WiFi {b['rssi_dbm']} dBm")
+        if b["failed_wakes"]:
+            parts.append(f"{b['failed_wakes']} failed WiFi attempts")
+        return ('<p>Battery: ' + " · ".join(parts) + '</p>'
+                '<form method="post" action="/battery/reset" class="bar">'
+                '<button class="btn" type="submit">New batteries inserted</button></form>')
+
+    def do_POST(self):
+        if urlparse(self.path).path == "/battery/reset":
+            self.dash.battery.reset(reason="reset on the preview page")
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+        else:
+            self.send_error(404)
 
     def log_message(self, fmt, *args):
         log.info("%s %s", self.address_string(), fmt % args)

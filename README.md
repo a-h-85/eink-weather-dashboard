@@ -116,9 +116,15 @@ Germany, set `provider = "openmeteo"`.
   divider). 5-band 1 MΩ resistors read brown-black-black-**yellow**-brown.
 - No multimeter? `firmware/pololu_test` turns the XIAO into a voltmeter to check the regulator.
 
-**Battery life** (estimate): about 0.15 mAh per update (WiFi + refresh), 48 updates a day plus
-sleep current ≈ 10 mAh/day, so **3 × 2000 mAh NiMH last about 5–6 months**. A static IP
-(`config.h`) saves another second of WiFi per wake-up.
+**Battery level is counted, not guessed from the voltage.** NiMH cells stay on a flat plateau
+for most of their life (50–80 mV per cell between full and half empty, less than the ESP32's
+ADC error), so the ESP32 reports how long it was awake, failed WiFi attempts included, and the
+Pi adds the sleep current: `level = 1 − used mAh / capacity`. The voltage only guards the very
+end and detects fresh cells; the preview page also has a *New batteries inserted* button and
+shows mAh per day, days left and the WiFi signal.
+
+**Battery life** (measured): about 10 mAh per day with 48 updates, so **3 × 1900 mAh NiMH last
+about 6 months**. A static IP (`config.h`) saves another second of WiFi per wake-up.
 
 ---
 
@@ -215,7 +221,7 @@ use the `GxEPD2_420` driver class in the sketch.
 | `weather` | `provider` | `"dwd"` (Germany) or `"openmeteo"` (worldwide); the other one is the fallback |
 | `display` | `language`, `refresh_minutes` | `"en"` or `"de"` (default; the preview page can switch it); update interval, aligned to the clock |
 | `server` | `host`, `port` | Where the server listens |
-| `battery` | `type`, `cells` | `"nimh"` uses a NiMH discharge curve; `"linear"` maps `empty_mv`…`full_mv` |
+| `battery` | `type`, `cells`, `capacity_mah` | `"nimh"` counts the charge used (see below); `"linear"` maps `empty_mv`…`full_mv` (Li-ion, alkaline) |
 
 Endpoints: `/` preview page with an **English / Deutsch** switch (saved on the Pi, used from the next update), `/preview.png`, `/display.bin` (for the ESP32), `/api/weather` (JSON).
 
